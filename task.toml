@@ -1,0 +1,84 @@
+name = "claim-settlement"
+
+# The verifier reads only these paths from the agent's final environment. Must stay top-level:
+# nested under [verifier] the value is silently dropped and the verifier receives nothing.
+artifacts = [
+    "/app/predictor/src/",
+    "/app/predictor/Cargo.toml",
+    "/app/predictor/Cargo.lock",
+    "/app/data/",
+    "/app/out/",
+]
+
+[metadata]
+author_name = "anonymous"
+author_email = "anonymous"
+category = "Operations"
+subcategory = "Claims"
+tags = ["rust", "selection-bias", "collider", "regression", "claims"]
+languages = ["rust"]
+difficulty = "core"
+expert_time_estimate_hours = 5
+
+difficulty_explanation = """
+The claims that carry a settlement time are the ones the desk actually worked, and the desk did not pick them at random. history.dat says how each one arrived: `review` if it was pulled by the standing rule, `spot_check` if it came from the random quality programme. The rule is the whole problem. A claim goes to review when the amount is over the escalation line OR when the intake handler asks for a second look, and what the handler was reacting to is a judgement written on no form and present in no column.
+
+That is selection on a collider, and it is the one shape in this family that still bites. A filter on the columns you can see does not disturb the relationship between them and the outcome, which is why most sampling quirks are harmless. This filter is on a common effect of two causes: the amount, which is exported, and the handler judgement, which is not. Conditioning on it ties the two together inside the reviewed cohort even though they are independent across the whole book. A large amount among reviewed claims is evidence the handler did not flag it, so the amount coefficient absorbs the missing judgement and comes out at 6.61 where the book's own figure is 4.00. Applied to a book that was not filtered, that steep coefficient is simply wrong.
+
+What makes it load-bearing is that the wrong cohort is the big one. There are 4572 reviewed claims against 600 spot checks, and every check the agent can build at scale runs on the reviewed file. Split it in half and score the biased fit on the held-back part and it returns 0.6992, while the clean fit returns 0.3598 on that same split. The only validation available at any real sample size says, clearly and consistently, that the wrong answer is better. It is not better: on the book being priced the reviewed fit scores -0.0581 and the spot-check fit 0.4162.
+
+The way out is stated as a fact and never as advice. The data dictionary records that spot checks are drawn from the month's book at random and worked regardless of amount, paperwork or anything the handler thought, and that the review triggers are either-or. It does not say that this makes one cohort usable and the other not. Working that out is the task.
+
+Nothing else in the export rewards effort. There is no contaminated column, so a provenance sweep finds nothing; the two features are independent and clean; and more capacity, regularisation or feature engineering all inherit whichever cohort they were fitted on. Measured on the shipped book: fitting the reviewed cohort scores -0.0581, pooling both cohorts scores 0.1988, fitting the spot checks scores 0.4162, and down-weighting the reviewed rows rather than dropping them reaches 0.4380. The bar is 0.30, which is 0.10 above the best route that ignores the split and 0.12 below the weakest route that respects it.
+
+The implementation is deliberately small. Ordinary least squares on an intercept and two features, with a three by three solve written out because the standard library has no linear algebra, is about a hundred lines of Rust. That is not where the difficulty is: an agent that writes a flawless solver and fits the wrong cohort fails, and one that writes a crude solver and fits the right cohort passes.
+
+Both books are synthetic and come from solution/generate_data.py, which ships. Settlement time is a linear function of amount, paperwork score and the handler judgement, with the judgement the largest single driver and exported nowhere; the review rule is then applied to decide which rows survive into history.dat. Synthetic is what makes the task gradeable, since the real settlement times have to be known exactly to score against, and it is what keeps the result honest: the selection rule is the only difference between the cohorts, so a route that clears the bar has demonstrably handled it rather than some other artefact. The realism that matters is structural. A desk that escalates on either of two triggers and runs a small random audit alongside is exactly how claims operations are organised, and the fact that one of those triggers is never written down is the ordinary case rather than a contrived one.
+
+In a real business this sits with a claims operations analyst, or the pricing actuary they report to, at an insurer or a third-party administrator. Setting a reserve against the current book from the desk's own settled history is routine work for that role, and fitting on worked claims without asking why those claims were worked is a known and regularly missed hazard in exactly that setting.
+"""
+
+solution_explanation = """
+The reference (solution/solve.sh) installs src/main.rs and runs the project's build script. It reads history.dat, keeps only the rows whose review_route is spot_check, and fits ordinary least squares of settle_days on an intercept, amount_z and doc_score_z. The three by three normal equations are solved by Gaussian elimination with partial pivoting, written out because the Rust standard library has no linear algebra and the box is offline. Predictions are that fit evaluated on batch.dat.
+
+The cohort filter is one line, and it is the whole answer. FIT_ROUTE is a named constant so the comparison is reproducible from what ships: rebuild with it set to review and the same code scores -0.0581 on the book instead of 0.4162, and with the filter removed altogether it pools both cohorts and scores 0.1988. Neither of those is a different program, only a different cohort.
+
+It scores 0.4162 on the shipped book against the 0.30 bar, and 0.5090 on the unseen book against 0.25. Down-weighting the reviewed rows instead of dropping them reaches 0.4380 and 0.5272, so the reference takes the simplest correct route rather than the best one, and the bar is placed to admit both.
+"""
+
+verification_explanation = """
+Twelve checks run, and the graded numbers come from a binary the verifier builds itself. test.sh discards whatever is on disk, restores the crate from a root-owned pristine copy of the collected sources, stamps the sources so cargo cannot treat an older mtime as already built, and runs cargo clean followed by a release build. The agent never hands over a binary, only source.
+
+Six of the checks grade the book that shipped in the agent's image and six grade a second run against a book from a different desk, baked in at /opt/holdout and never present in any container the agent can reach. Both runs are held to the same structural contract, which is the part worth stating: header and exactly two fields per row, one-to-one claim coverage with a repeated claim id rejected outright, finite and positive times, and quotes that vary by more than five days. A holdout run checked only for coverage would let a wrong header through, because the first line is skipped whatever it says, and let a duplicated claim through, because a later row overwrites an earlier one.
+
+On top of those: the shipped export comes back byte-identical by sha256, R squared on the book reaches 0.30, R squared on the unseen book reaches a slacker 0.25, and the two runs do not produce the same numbers. instruction.md names both bars, so there is no graded threshold the agent was not told about. The second book is a different desk rather than a different seed: a program carrying the shipped coefficients in its source scores -2.835 there, where one that refits from whatever is in /app/data reads the new relationship off it and clears the bar.
+
+The verifier recompiles and runs agent-authored code in the container that holds the answer key, so that work is done by an unprivileged user through setpriv with supplementary groups cleared and no-new-privileges set. Each run is its own session and its process group is torn down afterwards, then every process that user still owns is swept. /tests and /logs/verifier are both closed to that user before anything untrusted starts, and the run is abandoned with reward 0 rather than graded if either is still reachable. Output is staged only if it is a regular file, because the build could otherwise drop a symlink pointing into /opt/golden for root-run pytest to dereference, and every read here opens O_NOFOLLOW as well. pytest runs with -P so agent code cannot shadow it with an /app/pytest.py.
+
+solution/generate_data.py regenerates the shipped book byte for byte and solution/generate_holdout.py produces the second one, so every figure above can be re-derived rather than taken on trust.
+"""
+
+relevant_experience = """
+I authored the fleet predictive-maintenance task accepted into the previous edition of the benchmark and several of the tasks in this one, four of which have been accepted. The judgement that shaped this one is a result from that batch: what survives is an error that the agent's own validation actively recommends, and what dies is difficulty that a sweep of the columns can announce. I also measured the version of this mechanism that does not work before building the one that does. Selecting on a collider whose causes are all exported produces a striking phantom correlation and no bias at all, because a filter on observed columns leaves the conditional mean alone; it only bites when one of the two causes is missing from the export, which is the case here.
+"""
+
+[verifier]
+# Two runs, each a clean rebuild of the agent's crate. The crate has no dependencies and builds in
+# seconds, but 1800 is the floor and leaves no headroom.
+timeout_sec = 3600
+environment_mode = "separate"
+network_mode = "no-network"
+
+[agent]
+timeout_sec = 5400
+network_mode = "no-network"
+
+# Must be "public" on every task: the environment phase is where the image is built and the solve
+# harness installs its own toolchain, and an offline baseline kills every attempt before the agent
+# starts. The task itself is air-gapped, with the agent and verifier phases both no-network.
+[environment]
+network_mode = "public"
+build_timeout_sec = 900
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240

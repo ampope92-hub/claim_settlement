@@ -1,0 +1,11 @@
+[package]
+name = "claim_predictor"
+version = "0.1.0"
+edition = "2021"
+
+# Empty on purpose. The box is offline and nothing new can be fetched, so the fit is written
+# against the standard library.
+[dependencies]
+
+[profile.release]
+opt-level = 2
